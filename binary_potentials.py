@@ -11,7 +11,7 @@ class BinPotentialsLayer(nn.Module):
         self.layer = nn.Linear(2048, self.P * self.D * self.L)
     def forward(self, x):
         output = self.layer(x)
-        A = output.reshape(self.P, self.L, self.D)
-        return F.softmax(A, dim=1)
+        A = output.reshape(self.L, self.P, self.D)
+        return F.softmax(A, dim=0)
 
 
