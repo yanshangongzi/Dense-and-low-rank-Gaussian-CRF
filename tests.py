@@ -1,11 +1,11 @@
 from layers import ConjugateGradients, dense_gaussian_crf
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim
 
-import unary
-import unary1
+import models
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,14 +22,9 @@ def conjgrad_test(shift=0.01, max_iter=500, tolerance=1e-4, batch_size=10, d=128
     log_str = "Shift %.7g, tol %.7g, H %d W %d" %(shift, tolerance, H, W)
     assert nn.MSELoss()(B, B_opt) < tolerance, log_str
 
-    del A
-    del B
-    del x_opt
-    del ATA_I
-    del B_opt
-
     torch.cuda.empty_cache()
     print('ConjGrad Success')
+
 
 def optimization_test(batch_size=10, d=128, H = 50, W = 50, n_epochs=200, shift=0.01):
     A = torch.normal(mean=0, std=0.1, size=(batch_size, d, H * W), device=device, requires_grad=True)
@@ -52,7 +47,31 @@ def optimization_test(batch_size=10, d=128, H = 50, W = 50, n_epochs=200, shift=
     print('CRF Success')
 
 
-def run_tests():
+def down_size(in_size):
+    out_size = int(in_size)
+    out_size = (out_size + 1) // 2
+    out_size = int(np.ceil((out_size + 1) / 2.0))
+    out_size = (out_size + 1) // 2
+    return out_size
+
+
+def check_unary_prototypes(model, batch_size, n_labels, H, W):
+    X = torch.zeros(batch_size, 3, H, W, device=device)
+    out = model(X)
+
+    print(out.shape)
+    assert out.shape == (batch_size, n_labels, down_size(H), down_size(W))
+
+def check_pairwise_prototypes(model, batch_size, n_labels, H, W, embedding_size):
+    X = torch.zeros(batch_size, 3, H, W, device=device)
+    out = model(X)
+
+    print(out.shape)
+    assert out.shape == (batch_size, embedding_size, n_labels, down_size(H), down_size(W))
+
+
+
+def run_layers_tests():
     for shift in [1e-3, 1e-2, 1e-1, 1.0]:
         for tolerance in [1e-4, 1e-5, 1e-6]:
             for (H, W) in [(10, 10), (50, 50), (80, 80)]:
@@ -64,5 +83,5 @@ def run_tests():
 
 
 if __name__ == '__main__':
-    run_tests()
-
+    model = models.ResNetPW(3, 128, [3, 4, 23, 3], 21).to(device)
+    check_pairwise_prototypes(model, 3, 21, 321, 321, 128)

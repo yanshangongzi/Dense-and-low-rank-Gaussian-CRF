@@ -72,3 +72,4 @@ def dense_gaussian_crf(solver):
             return dL_dA, dL_dB
 
     return DenseGaussianCRF.apply
+
