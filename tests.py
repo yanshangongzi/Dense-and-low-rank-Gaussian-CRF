@@ -4,12 +4,14 @@ import torch
 import torch.nn as nn
 import torch.optim
 
+import unary
+import unary1
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def optimization_test(n_epochs=10, shift=0.01):
-    A = torch.normal(mean=0, std=0.1, size=(10, 128, 321 * 321), device=device, requires_grad=True)
-    B = torch.normal(mean=0, std=0.1, size=(10, 321 * 321, 1), device=device, requires_grad=True)
+def optimization_test(batch_size=10, d=128, H = 320, W = 320, n_epochs=10, shift=0.01):
+    A = torch.normal(mean=0, std=0.1, size=(batch_size, d, H * W), device=device, requires_grad=True)
+    B = torch.normal(mean=0, std=0.1, size=(batch_size, H * W, 1), device=device, requires_grad=True)
     dcrf = dense_gaussian_crf(ConjugateGradients(shift))
     opt = torch.optim.Adam([A, B], lr=3e-2)
     criterion = nn.MSELoss()
