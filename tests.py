@@ -1,4 +1,4 @@
-from layers import ConjugateGradients, PottsTypeConjugateGradients, dense_gaussian_crf
+from layers import ConjugateGradients, PottsTypeConjugateGradients, dense_gaussian_crf, potts_type_crf
 
 import numpy as np
 import torch
@@ -65,6 +65,7 @@ def optimization_test(batch_size=10, d=128, H = 50, W = 50, n_epochs=200, shift=
         opt.zero_grad()
         x = dcrf(A, B)
         loss = criterion(x, torch.zeros_like(x))
+        print(loss)
         min_loss = min(min_loss, loss)
         loss.backward()
         opt.step()
@@ -72,6 +73,27 @@ def optimization_test(batch_size=10, d=128, H = 50, W = 50, n_epochs=200, shift=
     assert min_loss < torch.tensor(1e-2 * H, device=device)
 
     print('CRF Success')
+
+
+def potts_optimization_test(batch_size=10, d=128, H = 50, W = 50, L = 2, n_epochs=200, shift=0.01):
+    A = torch.normal(mean=0, std=0.1, size=(batch_size, d, H * W), device=device, requires_grad=True)
+    B = torch.normal(mean=0, std=0.1, size=(batch_size, H * W * L, 1), device=device, requires_grad=True)
+    crf = potts_type_crf(PottsTypeConjugateGradients(shift=shift))
+    opt = torch.optim.Adam([A, B], lr=3e-3)
+    criterion = nn.MSELoss()
+
+    min_loss = torch.tensor(100.0, device=device)
+    for i in range(n_epochs):
+        opt.zero_grad()
+        x = crf(A, B)
+        loss = criterion(x, torch.zeros_like(x))
+        print(loss)
+        min_loss = min(min_loss, loss)
+        loss.backward()
+        opt.step()
+
+    assert min_loss < torch.tensor(1e-2 * H)
+
 
 
 def down_size(in_size):
@@ -110,4 +132,4 @@ def run_layers_tests():
 
 
 if __name__ == '__main__':
-    run_layers_tests()
+    potts_optimization_test()
