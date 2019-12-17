@@ -10,13 +10,15 @@ from torchvision.datasets import VOCSegmentation
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 from torch.autograd import Variable
+from torchvision.models.segmentation import deeplabv3_resnet101
 
 from models import ResDeepLab
 import time
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-PIXEL_MEANS = [104.008, 116.669, 122.675]
+PIXEL_MEANS = [0.485, 0.456, 0.406]
+PIXEL_VARS = [0.229, 0.224, 0.225]
 
 
 voc_dir = 'VOC2012'
@@ -44,7 +46,7 @@ to_tensor_normalize = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(
         PIXEL_MEANS,
-        [1.0, 1.0, 1.0]
+        PIXEL_VARS
     )
 ])
 
@@ -103,7 +105,6 @@ class PascalVOCDataset():
         seg = Image.fromarray(seg).convert('P')
         seg = seg_resize(321, self.scale)(seg)
         seg = flip(seg)
-        seg = seg_resize(down_size(int(321 * self.scale)), 1)(seg)
         seg = torch.from_numpy(np.array(seg.getchannel(0)))
 
         self.count = (self.count + 1) % len(self)
@@ -162,7 +163,7 @@ def train_epoch_unary(train_loader, model, opt):
         img = data[0].to(device)
         seg = data[1].long().to(device)
 
-        out = model(img)
+        out = model(img)['out']
         loss = criterion(out, seg)
         loss.backward()
         opt.step()
@@ -194,8 +195,22 @@ def train_unary(train_loader, model, opt, n_epochs):
     return model
 
 
-model = ResDeepLab().to(device)
-opt = torch.optim.Adam(model.parameters(), lr=3e-4)
 
-model = train_unary(train_voc_loader, model, opt, 1)
+#model = ResDeepLab().to(device)
 
+#model = train_unary(train_voc_loader, model, opt, 1)
+model = deeplabv3_resnet101(pretrained=True)
+model = model.to(device)
+model.aux_classifier = nn.Identity()
+model.classifier = nn.Identity()
+model.layer4 = nn.Identity()
+print(model)
+#print(model)
+#opt = torch.optim.Adam(model.parameters(), lr=3e-4)
+#model = train_unary(train_voc_loader, model, opt, 1)
+
+for img, seg in train_voc_loader:
+    img = img.to(device)
+    seg = img.to(device)
+    out = model(img)['out']
+    print(out.shape)
