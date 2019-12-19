@@ -233,6 +233,31 @@ def calc_acc(out, seg):
     return right.mean(dim=(1, 2)).mean()
 
 
+def evaluate(model, val_loader, iter_n):
+    criterion = nn.CrossEntropyLoss()
+    model.eval()
+    acc = 0
+    iou = 0
+    count = 0
+    loss = 0
+    for img, seg in val_loader:
+        img = img.to(device)
+        seg = seg.long().to(device)
+        out = model(img)['out']
+        loss += criterion(out, seg).item()        
+        pred = torch.argmax(out, dim=1)
+        acc += calc_acc(pred, seg)
+        iou += calc_iou(pred, seg)
+
+        if count == 0:
+            writer.add_image('images/val/img', vutils.make_grid(img[0].detach(), normalize=True, scale_each=True), iter_n)
+            writer.add_image('images/val/gt', pred_to_img(seg[0].detach()), iter_n, dataformats='HWC')
+            writer.add_image('images/val/pred', pred_to_img(pred[0].detach()), iter_n, dataformats='HWC')
+
+        count += 1
+
+    return loss / count, acc / count, iou / count
+
 def train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n=0):
     criterion = nn.CrossEntropyLoss()
 
@@ -257,29 +282,14 @@ def train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n=0):
         writer.add_scalar('train/IoU', train_iou, iter_n)
         writer.add_scalar('train/acc', train_acc, iter_n)
 
-        if iter_n % 30 == 0:
-            model.eval()
-            val_img, val_seg = next(iter(val_loader))
-            val_img = val_img.to(device)
-            val_seg = val_seg.long().to(device)
-
-            val_out = model(val_img)['out']
-            val_loss = criterion(val_out, val_seg)
-
-            val_pred = torch.argmax(val_out, dim=1)
-            val_iou = calc_iou(val_pred, val_seg)
-            val_acc = calc_acc(val_pred, val_seg)
-            
-            writer.add_scalar('val/loss', val_loss.item(), iter_n)
-            writer.add_scalar('val/IoU', val_iou, iter_n)
-            writer.add_scalar('val/acc', val_acc, iter_n)
-
-            writer.add_image('images/img', vutils.make_grid(val_img[0].detach(), normalize=True, scale_each=True), iter_n)
-            writer.add_image('images/gt', pred_to_img(val_seg[0].detach()), iter_n, dataformats='HWC')
-            writer.add_image('images/pred', pred_to_img(val_pred[0].detach()), iter_n, dataformats='HWC')
+        if iter_n % 100 == 0:
+            writer.add_image('images/img', vutils.make_grid(img[0].detach(), normalize=True, scale_each=True), iter_n)
+            writer.add_image('images/gt', pred_to_img(seg[0].detach()), iter_n, dataformats='HWC')
+            writer.add_image('images/pred', pred_to_img(train_pred[0].detach()), iter_n, dataformats='HWC')
             model.train()
+            print(iter_n)
         iter_n += 1
-
+        
     return model, iter_n
 
 
@@ -297,5 +307,14 @@ def train(train_loader, val_loader, model, opt, sch, n_epochs, start_epoch=0, it
         print('Executed %d seconds' %(cur_time - since))
 
         torch.save(model.state_dict(), 'models/unary_' + str(start_epoch + i) + '.pth')
+        val_loss, val_acc, val_iou = evaluate(model, val_loader, iter_n)
+        writer.add_scalar('val/loss', val_loss, iter_n)
+        writer.add_scalar('val/IoU', val_iou, iter_n)
+        writer.add_scalar('val/acc', val_acc, iter_n)
 
     return model, iter_n
+
+
+
+
+
