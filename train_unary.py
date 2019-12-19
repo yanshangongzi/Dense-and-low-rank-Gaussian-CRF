@@ -13,6 +13,7 @@ import tensorboardX
 from tensorboardX import SummaryWriter
 import torchvision.utils as vutils
 
+import scipy.io
 from models import ResDeepLab
 import time
 
@@ -72,11 +73,17 @@ class PascalVOCDataset():
         with open(os.path.join(voc_dir, names_dir, mode + '.txt'), 'r') as f:
             self.names = [line[:-1] for line in f]
 
+        remains = len(self.names) % batch_size
+        if remains != 0:
+            self.names = self.names[:-remains]
+
         self.voc_dir = voc_dir
         self.image_dir = image_dir
         self.segmentation_dir = segmentation_dir
         self.mode = mode
+        self.count = 0
         self.batch_size = batch_size
+        self.scale = 1
 
     def __len__(self):
         return len(self.names)
@@ -85,23 +92,98 @@ class PascalVOCDataset():
         img_name = self.names[idx]
         img = Image.open(os.path.join(self.voc_dir, self.image_dir, img_name + '.jpg'))
 
+
+        if self.count % self.batch_size == 0:
+            self.scale = np.random.uniform(1.0, 1.2)
+
+        img = img_resize(224, self.scale)(img)
+
         p_flip = np.random.uniform(0, 1)
         flip = horizontal_flip(p_flip)
-
-        img = img_resize(256, 1)(img)
-        img = crop(224)(img)
         img = flip(img)
+
         img = to_tensor_normalize(img)
 
         seg = np.array(Image.open(os.path.join(self.voc_dir, self.segmentation_dir, img_name + '.png')))
         seg[seg == 255] = 0
         seg = Image.fromarray(seg).convert('P')
-        seg = seg_resize(256, 1)(seg)
-        seg = crop(224)(seg)
+        seg = seg_resize(224, self.scale)(seg)
         seg = flip(seg)
         seg = torch.from_numpy(np.array(seg.getchannel(0)))
 
+        self.count = (self.count + 1) % len(self)
         return img, seg
+
+
+class ContourDataset():
+    def __init__(self, contour_dir, contour_img_dir, contour_names, batch_size=10):
+        with open(contour_names, 'r') as f:
+            self.names = [line[:-1] for line in f]
+
+        remains = len(self.names) % batch_size
+        if remains != 0:
+            self.names = self.names[:-remains]
+
+        self.contour_dir = contour_dir
+        self.contour_img_dir = contour_img_dir
+        self.count = 0
+        self.batch_size = batch_size
+        self.scale = 1
+
+    def __len__(self):
+        return len(self.names)
+
+    def __getitem__(self, idx):
+        img_name = self.names[idx]
+        img = Image.open(os.path.join(self.contour_img_dir, img_name + '.jpg'))
+
+        if self.count % self.batch_size == 0:
+            self.scale = np.random.uniform(1.0, 1.2)
+
+        img = img_resize(224, self.scale)(img)
+
+        p_flip = np.random.uniform(0, 1)
+        flip = horizontal_flip(p_flip)
+        img = flip(img)
+
+        img = to_tensor_normalize(img)
+
+        seg = scipy.io.loadmat(os.path.join(self.contour_dir, img_name + '.mat'))
+        seg = seg['GTcls']['Segmentation'][0][0]
+        seg[seg > 20] = 0
+        seg = Image.fromarray(seg).convert('P')
+        seg = seg_resize(224, self.scale)(seg)
+        seg = flip(seg)
+        seg = torch.from_numpy(np.array(seg.getchannel(0)))
+        self.count = (self.count + 1) % len(self)
+        return img, seg
+        
+
+class ExpandedVOCDataset():
+    def __init__(self, voc_dir, image_dir, segmentation_dir, names_dir, mode, contour_dir, contour_img_dir,
+                 contour_names, batch_size=10):
+        self.WOK = PascalVOCDataset(voc_dir, image_dir, segmentation_dir, names_dir, mode, batch_size)
+        self.contour = ContourDataset(contour_dir, contour_img_dir, contour_names, batch_size)
+        self.first = np.arange(len(self.WOK))
+        self.second = np.arange(len(self.contour))
+
+        self.WOK_len = (len(self.WOK) // batch_size) * batch_size
+        self.contour_len = (len(self.contour) // batch_size) * batch_size
+
+    def __len__(self):
+        return self.WOK_len + self.contour_len
+
+    def __getitem__(self, idx):
+        if idx < self.WOK_len:
+            res = self.WOK[self.first[idx]]
+        else:
+            res = self.contour[self.second[idx - self.WOK_len]]
+
+        if idx == len(self) - 1:
+            np.random.shuffle(self.first)
+            np.random.shuffle(self.second)
+
+        return res
 
 
 def pred_to_img(pred):
