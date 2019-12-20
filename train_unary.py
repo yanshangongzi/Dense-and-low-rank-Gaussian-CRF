@@ -3,15 +3,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
-import cv2
 import PIL
 from PIL import Image
 from torchvision.datasets import VOCSegmentation
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 from torch.autograd import Variable
-from torchvision.models.segmentation import deeplabv3_resnet101
+import tensorboardX
+from tensorboardX import SummaryWriter
+import torchvision.utils as vutils
 
+import scipy.io
 from models import ResDeepLab
 import time
 
@@ -20,12 +22,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIXEL_MEANS = [0.485, 0.456, 0.406]
 PIXEL_VARS = [0.229, 0.224, 0.225]
 
-
-voc_dir = 'VOC2012'
-image_dir = 'JPEGImages'
-segmentation_dir = 'SegmentationClass'
-names_dir = 'ImageSets/Segmentation'
-
+writer = SummaryWriter()
 
 def img_resize(size, scale):
     new_size = int(size * scale)
@@ -41,6 +38,9 @@ def horizontal_flip(p):
 
     return transforms.RandomHorizontalFlip(0.0)
 
+def crop(size):
+    crop = transforms.CenterCrop(size)
+    return crop
 
 to_tensor_normalize = transforms.Compose([
     transforms.ToTensor(),
@@ -73,6 +73,10 @@ class PascalVOCDataset():
         with open(os.path.join(voc_dir, names_dir, mode + '.txt'), 'r') as f:
             self.names = [line[:-1] for line in f]
 
+        remains = len(self.names) % batch_size
+        if remains != 0:
+            self.names = self.names[:-remains]
+
         self.voc_dir = voc_dir
         self.image_dir = image_dir
         self.segmentation_dir = segmentation_dir
@@ -90,9 +94,9 @@ class PascalVOCDataset():
 
 
         if self.count % self.batch_size == 0:
-            self.scale = np.random.uniform(0.5, 1.3)
+            self.scale = np.random.uniform(1.0, 1.2)
 
-        img = img_resize(321, self.scale)(img)
+        img = img_resize(224, self.scale)(img)
 
         p_flip = np.random.uniform(0, 1)
         flip = horizontal_flip(p_flip)
@@ -103,19 +107,95 @@ class PascalVOCDataset():
         seg = np.array(Image.open(os.path.join(self.voc_dir, self.segmentation_dir, img_name + '.png')))
         seg[seg == 255] = 0
         seg = Image.fromarray(seg).convert('P')
-        seg = seg_resize(321, self.scale)(seg)
+        seg = seg_resize(224, self.scale)(seg)
         seg = flip(seg)
         seg = torch.from_numpy(np.array(seg.getchannel(0)))
 
         self.count = (self.count + 1) % len(self)
         return img, seg
 
-batch_size = 2
-train_voc_dataset = PascalVOCDataset(voc_dir, image_dir, segmentation_dir, names_dir, 'train', batch_size=batch_size)
-train_voc_loader = torch.utils.data.DataLoader(train_voc_dataset, batch_size=batch_size, shuffle=True)
 
-val_voc_dataset = PascalVOCDataset(voc_dir, image_dir, segmentation_dir, names_dir, 'val', batch_size=batch_size)
-val_voc_loader = torch.utils.data.DataLoader(val_voc_dataset, batch_size=batch_size, shuffle=True)
+class ContourDataset():
+    def __init__(self, contour_dir, contour_img_dir, contour_names, batch_size=10):
+        with open(contour_names, 'r') as f:
+            self.names = [line[:-1] for line in f]
+
+        remains = len(self.names) % batch_size
+        if remains != 0:
+            self.names = self.names[:-remains]
+
+        self.contour_dir = contour_dir
+        self.contour_img_dir = contour_img_dir
+        self.count = 0
+        self.batch_size = batch_size
+        self.scale = 1
+
+    def __len__(self):
+        return len(self.names)
+
+    def __getitem__(self, idx):
+        img_name = self.names[idx]
+        img = Image.open(os.path.join(self.contour_img_dir, img_name + '.jpg'))
+
+        if self.count % self.batch_size == 0:
+            self.scale = np.random.uniform(1.0, 1.2)
+
+        img = img_resize(224, self.scale)(img)
+
+        p_flip = np.random.uniform(0, 1)
+        flip = horizontal_flip(p_flip)
+        img = flip(img)
+
+        img = to_tensor_normalize(img)
+
+        seg = scipy.io.loadmat(os.path.join(self.contour_dir, img_name + '.mat'))
+        seg = seg['GTcls']['Segmentation'][0][0]
+        seg[seg > 20] = 0
+        seg = Image.fromarray(seg).convert('P')
+        seg = seg_resize(224, self.scale)(seg)
+        seg = flip(seg)
+        seg = torch.from_numpy(np.array(seg.getchannel(0)))
+        self.count = (self.count + 1) % len(self)
+        return img, seg
+        
+
+class ExpandedVOCDataset():
+    def __init__(self, voc_dir, image_dir, segmentation_dir, names_dir, mode, contour_dir, contour_img_dir,
+                 contour_names, batch_size=10):
+        self.WOK = PascalVOCDataset(voc_dir, image_dir, segmentation_dir, names_dir, mode, batch_size)
+        self.contour = ContourDataset(contour_dir, contour_img_dir, contour_names, batch_size)
+        self.first = np.arange(len(self.WOK))
+        self.second = np.arange(len(self.contour))
+
+        self.WOK_len = (len(self.WOK) // batch_size) * batch_size
+        self.contour_len = (len(self.contour) // batch_size) * batch_size
+
+    def __len__(self):
+        return self.WOK_len + self.contour_len
+
+    def __getitem__(self, idx):
+        if idx < self.WOK_len:
+            res = self.WOK[self.first[idx]]
+        else:
+            res = self.contour[self.second[idx - self.WOK_len]]
+
+        if idx == len(self) - 1:
+            np.random.shuffle(self.first)
+            np.random.shuffle(self.second)
+
+        return res
+
+
+def pred_to_img(pred):
+    palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
+    colors = torch.as_tensor([i for i in range(21)])[:, None] * palette
+    colors = (colors % 255).numpy().astype("uint8")
+
+    r = Image.fromarray(pred.byte().cpu().numpy())
+    r.putpalette(colors)
+    r = r.convert('RGB')
+    r = np.array(r)
+    return torch.tensor(np.array(r))
 
 
 def calc_iou(out, seg, n_classes=21):
@@ -148,17 +228,18 @@ def calc_iou(out, seg, n_classes=21):
 
     return res.mean()
 
+def calc_acc(out, seg):
+    right = (out == seg).float()
+    return right.mean(dim=(1, 2)).mean()
 
-def train_epoch_unary(train_loader, model, opt):
+
+def train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n=0):
     criterion = nn.CrossEntropyLoss()
 
     model.train()
-    losses = []
-    i = 0
+
     for data in train_loader:
-        i += 1
-        if i % 10 == 0:
-            break
+
         opt.zero_grad()
         img = data[0].to(device)
         seg = data[1].long().to(device)
@@ -167,17 +248,42 @@ def train_epoch_unary(train_loader, model, opt):
         loss = criterion(out, seg)
         loss.backward()
         opt.step()
+        sch.step()
 
-        pred = torch.argmax(out, dim=1)
-        print(loss.item())
-        print(calc_iou(pred, seg, 21))
+        train_pred = torch.argmax(out, dim=1)
+        train_iou = calc_iou(train_pred, seg)
+        train_acc = calc_acc(train_pred, seg)
+        writer.add_scalar('train/loss', loss.item(), iter_n)
+        writer.add_scalar('train/IoU', train_iou, iter_n)
+        writer.add_scalar('train/acc', train_acc, iter_n)
 
-        losses.append(loss.item())
+        if iter_n % 30 == 0:
+            model.eval()
+            val_img, val_seg = next(iter(val_loader))
+            val_img = val_img.to(device)
+            val_seg = val_seg.long().to(device)
 
-    return model, losses
+            val_out = model(val_img)['out']
+            val_loss = criterion(val_out, val_seg)
+
+            val_pred = torch.argmax(val_out, dim=1)
+            val_iou = calc_iou(val_pred, val_seg)
+            val_acc = calc_acc(val_pred, val_seg)
+            
+            writer.add_scalar('val/loss', val_loss.item(), iter_n)
+            writer.add_scalar('val/IoU', val_iou, iter_n)
+            writer.add_scalar('val/acc', val_acc, iter_n)
+
+            writer.add_image('images/img', vutils.make_grid(val_img[0].detach(), normalize=True, scale_each=True), iter_n)
+            writer.add_image('images/gt', pred_to_img(val_seg[0].detach()), iter_n, dataformats='HWC')
+            writer.add_image('images/pred', pred_to_img(val_pred[0].detach()), iter_n, dataformats='HWC')
+            model.train()
+        iter_n += 1
+
+    return model, iter_n
 
 
-def train_unary(train_loader, model, opt, n_epochs):
+def train(train_loader, val_loader, model, opt, sch, n_epochs, start_epoch=0, iter_n=0):
     since = time.time()
     if not os.path.exists('models'):
         os.makedirs('models')
@@ -186,31 +292,10 @@ def train_unary(train_loader, model, opt, n_epochs):
         os.makedirs('models/unary')
 
     for i in range(n_epochs):
-        model, losses = train_epoch_unary(train_loader, model, opt)
+        model, iter_n = train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n)
         cur_time = time.time()
         print('Executed %d seconds' %(cur_time - since))
 
-        torch.save(model.state_dict(), 'models/unary_' + str(i) + '.pth')
+        torch.save(model.state_dict(), 'models/unary_' + str(start_epoch + i) + '.pth')
 
-    return model
-
-
-
-#model = ResDeepLab().to(device)
-
-#model = train_unary(train_voc_loader, model, opt, 1)
-model = deeplabv3_resnet101(pretrained=True)
-model = model.to(device)
-model.aux_classifier = nn.Identity()
-model.classifier = nn.Identity()
-model.layer4 = nn.Identity()
-print(model)
-#print(model)
-#opt = torch.optim.Adam(model.parameters(), lr=3e-4)
-#model = train_unary(train_voc_loader, model, opt, 1)
-
-for img, seg in train_voc_loader:
-    img = img.to(device)
-    seg = img.to(device)
-    out = model(img)['out']
-    print(out.shape)
+    return model, iter_n
