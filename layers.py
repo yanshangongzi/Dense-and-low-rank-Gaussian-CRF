@@ -137,6 +137,7 @@ def potts_type_crf(solver):
         @staticmethod
         def backward(ctx, grad_output):
             A, x = ctx.saved_tensors
+            D = A.shape[1]
             P = A.shape[2]
             L = x.shape[1] // P
 
@@ -147,17 +148,15 @@ def potts_type_crf(solver):
 
             dL_dB = solver.solve(A, dL_dx)
 
-            dL_dB_x = torch.matmul(dL_dB, torch.transpose(x, 1, 2))
+            x_mtx = x.view(-1, L, P)
+            dB_mtx = dL_dB.view(-1, L, P)
 
-            F_mtx = torch.zeros(P * (L - 1) + 1, P * (L - 1) + 1, device=device)
+            x_sum = x_mtx.sum(dim=1)[:, None, :]
+            S = x_sum - x_mtx
 
-            idxs = torch.arange(P * (L - 1) + 1, device=device) % P == 0
-            F_mtx[idxs, idxs] = 1
-            #print(dL_dB_x.unsqueeze(1).shape)
-            #print(F_mtx.unsqueeze(0)[None, :, :, :].shape)
-            dL_dATA = F.conv2d(dL_dB_x.unsqueeze(1), F_mtx.unsqueeze(0)[None, :, :, :]).squeeze(1)
-
-            dL_dA = -torch.matmul(A, dL_dATA + torch.transpose(dL_dATA, 1, 2))
+            dL_dA = torch.matmul(torch.matmul(A, torch.transpose(dB_mtx, 1, 2)), S)
+            dL_dA += torch.matmul(torch.matmul(A, torch.transpose(S, 1, 2)), dB_mtx)
+            dL_dA = -dL_dA
 
             return dL_dA, dL_dB
 

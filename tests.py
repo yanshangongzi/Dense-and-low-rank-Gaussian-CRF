@@ -79,14 +79,14 @@ def potts_optimization_test(batch_size=10, d=128, H = 50, W = 50, L = 2, n_epoch
     A = torch.normal(mean=0, std=0.1, size=(batch_size, d, H * W), device=device, requires_grad=True)
     B = torch.normal(mean=0, std=0.1, size=(batch_size, H * W * L, 1), device=device, requires_grad=True)
     crf = potts_type_crf(PottsTypeConjugateGradients(shift=shift))
-    opt = torch.optim.SGD([A, B], lr=3e-4)
+    opt = torch.optim.Adam([A, B], lr=3e-3)
     criterion = nn.MSELoss()
 
     min_loss = torch.tensor(100.0, device=device)
     for i in range(n_epochs):
         opt.zero_grad()
         x = crf(A, B)
-        loss = criterion(x, torch.ones_like(x))
+        loss = criterion(x, torch.zeros_like(x))
         print(loss)
         min_loss = min(min_loss, loss)
         loss.backward()
@@ -132,4 +132,4 @@ def run_layers_tests():
 
 
 if __name__ == '__main__':
-    potts_optimization_test(H=10, W=10, shift=0.1)
+    potts_optimization_test(H=41, W=41, batch_size=10, d=1024, shift=0.1)
