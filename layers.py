@@ -8,11 +8,13 @@ import torchvision
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ConjugateGradients: # Модуль для решения СЛУ методом сопряженных градиентов
-    def __init__(self, shift=0, max_iter=500, tolerance=1e-3):
+    def __init__(self, shift=0, max_iter=100, tolerance=1e-3):
         self.shift = shift
         self.max_iter = max_iter
         self.tolerance = tolerance
         self.type = 'default'
+        self.epsilon = 1e-15
+        self.criterion = nn.MSELoss()
 
 
     def matrix_product(self, A, AT, x): # вычисление матричного произведения 
@@ -35,14 +37,14 @@ class ConjugateGradients: # Модуль для решения СЛУ метод
         for k in range(self.max_iter):
             r_kTr_k = torch.matmul(torch.transpose(r_k, 1, 2), r_k)
             ATAp_k = self.matrix_product(A, AT, p_k)
-            alpha_k = r_kTr_k / torch.matmul(torch.transpose(p_k, 1, 2), ATAp_k)
+            alpha_k = r_kTr_k / (torch.matmul(torch.transpose(p_k, 1, 2), ATAp_k) + self.epsilon)
             x_k += alpha_k * p_k
             r_k_new = r_k - alpha_k * ATAp_k
 
-            if torch.max(r_k_new) < self.tolerance:
+            if self.criterion(r_k_new, torch.zeros_like(r_k_new)) < self.tolerance:
                 break
 
-            beta_k = torch.matmul(torch.transpose(r_k_new, 1, 2), r_k_new) / r_kTr_k
+            beta_k = torch.matmul(torch.transpose(r_k_new, 1, 2), r_k_new) / (r_kTr_k + self.epsilon)
             p_k = r_k_new + beta_k * p_k
             r_k = r_k_new.clone()
 
@@ -79,11 +81,12 @@ def dense_gaussian_crf(solver):
 
 
 class PottsTypeConjugateGradients:
-    def __init__(self, shift=0, max_iter=500, tolerance=1e-3):
+    def __init__(self, shift=0, max_iter=100, tolerance=1e-4):
         self.shift = shift
         self.max_iter = max_iter
         self.tolerance = tolerance
         self.type = 'potts'
+        self.epsilon = 1e-15
 
 
     def matrix_product(self, A, AT, p, batch_size):
@@ -109,17 +112,18 @@ class PottsTypeConjugateGradients:
         r_k = B - self.matrix_product(A, AT, x_k, batch_size)
         p_k = r_k.clone()
 
+        criterion = nn.MSELoss()
         for k in range(self.max_iter):
             r_kTr_k = torch.matmul(torch.transpose(r_k, 1, 2), r_k)
             ATAp_k = self.matrix_product(A, AT, p_k, batch_size)
-            alpha_k = r_kTr_k / torch.matmul(torch.transpose(p_k, 1, 2), ATAp_k)
+            alpha_k = r_kTr_k / (torch.matmul(torch.transpose(p_k, 1, 2), ATAp_k) + self.epsilon)
             x_k += alpha_k * p_k
             r_k_new = r_k - alpha_k * ATAp_k
 
-            if torch.max(r_k_new) < self.tolerance:
+            if criterion(r_k_new, torch.zeros_like(r_k_new)) < self.tolerance:
                 break
 
-            beta_k = torch.matmul(torch.transpose(r_k_new, 1, 2), r_k_new) / r_kTr_k
+            beta_k = torch.matmul(torch.transpose(r_k_new, 1, 2), r_k_new) / (r_kTr_k + self.epsilon)
             p_k = r_k_new + beta_k * p_k
             r_k = r_k_new.clone()
 
@@ -137,6 +141,7 @@ def potts_type_crf(solver):
         @staticmethod
         def backward(ctx, grad_output):
             A, x = ctx.saved_tensors
+            D = A.shape[1]
             P = A.shape[2]
             L = x.shape[1] // P
 
@@ -147,18 +152,16 @@ def potts_type_crf(solver):
 
             dL_dB = solver.solve(A, dL_dx)
 
-            dL_dB_x = torch.matmul(dL_dB, torch.transpose(x, 1, 2))
+            x_mtx = x.view(-1, L, P)
+            dB_mtx = dL_dB.view(-1, L, P)
 
-            F_mtx = torch.zeros(P * (L - 1) + 1, P * (L - 1) + 1, device=device)
+            x_sum = x_mtx.sum(dim=1)[:, None, :]
+            S = x_sum - x_mtx
 
-            idxs = torch.arange(P * (L - 1) + 1, device=device) % P == 0
-            F_mtx[idxs, idxs] = 1
-            #print(dL_dB_x.unsqueeze(1).shape)
-            #print(F_mtx.unsqueeze(0)[None, :, :, :].shape)
-            dL_dATA = F.conv2d(dL_dB_x.unsqueeze(1), F_mtx.unsqueeze(0)[None, :, :, :]).squeeze(1)
+            dL_dA = torch.matmul(torch.matmul(A, torch.transpose(dB_mtx, 1, 2)), S)
+            dL_dA += torch.matmul(torch.matmul(A, torch.transpose(S, 1, 2)), dB_mtx)
+            dL_dA = -dL_dA
 
-            dL_dA = -torch.matmul(A, dL_dATA + torch.transpose(dL_dATA, 1, 2))
-
-            return dL_dA, dL_dB
+            return dL_dA / D, dL_dB / D
 
     return PottsTypeCRF.apply
