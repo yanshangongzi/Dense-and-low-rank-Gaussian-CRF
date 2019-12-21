@@ -67,9 +67,35 @@ def down_seg(seg, size):
 
     return res[0]
 
+class DefaultDataset():
+    def __init__(self, voc_dir, image_dir, segmentation_dir, names_dir, mode, batch_size):
+        with open(os.path.join(voc_dir, names_dir, mode + '.txt'), 'r') as f:
+            self.names = [line[:-1] for line in f]
+
+        self.voc_dir = voc_dir
+        self.image_dir = image_dir
+        self.segmentation_dir = segmentation_dir
+        self.batch_size = batch_size
+
+        
+    def __len__(self):
+        return len(self.names)
+
+    def __getitem__(self, idx):
+        img_name = self.names[idx]
+        img = Image.open(os.path.join(self.voc_dir, self.image_dir, img_name + '.jpg'))
+        img = to_tensor_normalize(img)
+
+        seg = np.array(Image.open(os.path.join(self.voc_dir, self.segmentation_dir, img_name + '.png')))
+        seg[seg == 255] = 0
+        seg = Image.fromarray(seg).convert('P')
+        seg = torch.from_numpy(np.array(seg.getchannel(0)))
+
+        return img, seg
+
 
 class PascalVOCDataset():
-    def __init__(self, voc_dir, image_dir, segmentation_dir, names_dir, mode, batch_size=10):
+    def __init__(self, voc_dir, image_dir, segmentation_dir, names_dir, mode, batch_size=10, size=224):
         with open(os.path.join(voc_dir, names_dir, mode + '.txt'), 'r') as f:
             self.names = [line[:-1] for line in f]
 
@@ -84,6 +110,7 @@ class PascalVOCDataset():
         self.count = 0
         self.batch_size = batch_size
         self.scale = 1
+        self.size = size
 
     def __len__(self):
         return len(self.names)
@@ -95,8 +122,9 @@ class PascalVOCDataset():
 
         if self.count % self.batch_size == 0:
             self.scale = np.random.uniform(1.0, 1.2)
+            self.scale = 1
 
-        img = img_resize(224, self.scale)(img)
+        img = img_resize(self.size, self.scale)(img)
 
         p_flip = np.random.uniform(0, 1)
         flip = horizontal_flip(p_flip)
@@ -107,7 +135,7 @@ class PascalVOCDataset():
         seg = np.array(Image.open(os.path.join(self.voc_dir, self.segmentation_dir, img_name + '.png')))
         seg[seg == 255] = 0
         seg = Image.fromarray(seg).convert('P')
-        seg = seg_resize(224, self.scale)(seg)
+        seg = seg_resize(self.size, self.scale)(seg)
         seg = flip(seg)
         seg = torch.from_numpy(np.array(seg.getchannel(0)))
 
@@ -116,7 +144,7 @@ class PascalVOCDataset():
 
 
 class ContourDataset():
-    def __init__(self, contour_dir, contour_img_dir, contour_names, batch_size=10):
+    def __init__(self, contour_dir, contour_img_dir, contour_names, batch_size=10, size=224):
         with open(contour_names, 'r') as f:
             self.names = [line[:-1] for line in f]
 
@@ -129,6 +157,7 @@ class ContourDataset():
         self.count = 0
         self.batch_size = batch_size
         self.scale = 1
+        self.size = size
 
     def __len__(self):
         return len(self.names)
@@ -139,8 +168,9 @@ class ContourDataset():
 
         if self.count % self.batch_size == 0:
             self.scale = np.random.uniform(1.0, 1.2)
+            self.scale = 1
 
-        img = img_resize(224, self.scale)(img)
+        img = img_resize(self.size, self.scale)(img)
 
         p_flip = np.random.uniform(0, 1)
         flip = horizontal_flip(p_flip)
@@ -152,7 +182,7 @@ class ContourDataset():
         seg = seg['GTcls']['Segmentation'][0][0]
         seg[seg > 20] = 0
         seg = Image.fromarray(seg).convert('P')
-        seg = seg_resize(224, self.scale)(seg)
+        seg = seg_resize(self.size, self.scale)(seg)
         seg = flip(seg)
         seg = torch.from_numpy(np.array(seg.getchannel(0)))
         self.count = (self.count + 1) % len(self)
@@ -198,7 +228,42 @@ def pred_to_img(pred):
     return torch.tensor(np.array(r))
 
 
-def calc_iou(out, seg, n_classes=21):
+def get_iou(pred, gt):
+    if pred.shape != gt.shape:
+        print('pred shape',pred.shape, 'gt shape', gt.shape)
+
+    assert(pred.shape == gt.shape)
+    gt = gt.astype(np.float32)
+    pred = pred.astype(np.float32)
+
+    max_label = 20 
+    count = np.zeros((max_label + 1,))
+    for j in range(max_label + 1):
+        x = np.where(pred == j)
+        p_idx_j = set(zip(x[0].tolist(),x[1].tolist()))
+        x = np.where(gt == j)
+        GT_idx_j = set(zip(x[0].tolist(),x[1].tolist()))
+ 
+        n_jj = set.intersection(p_idx_j,GT_idx_j)
+        u_jj = set.union(p_idx_j,GT_idx_j)
+        
+        if len(GT_idx_j) != 0:
+            count[j] = float(len(n_jj)) / float(len(u_jj))
+
+    result_class = count
+    Aiou = np.sum(result_class[:])/float(len(np.unique(gt))) 
+    
+    return Aiou
+
+
+def calc_iou(out, seg):
+    iou = 0
+    for i in range(out.shape[0]):
+        iou += get_iou(out.cpu().detach().numpy()[i], seg.cpu().detach().numpy()[i])
+
+    return iou / out.shape[0]
+
+def calc_iou1(out, seg, n_classes=21):
     if out.shape != seg.shape:
         print('out shape', out.shape)
         print('seg shape', seg.shape)
@@ -233,6 +298,31 @@ def calc_acc(out, seg):
     return right.mean(dim=(1, 2)).mean()
 
 
+def evaluate(model, val_loader, iter_n):
+    criterion = nn.CrossEntropyLoss()
+    model.eval()
+    acc = 0
+    iou = 0
+    count = 0
+    loss = 0
+    for img, seg in val_loader:
+        img = img.to(device)
+        seg = seg.long().to(device)
+        out = model(img)['out']
+        loss += criterion(out, seg).item()        
+        pred = torch.argmax(out, dim=1)
+        acc += calc_acc(pred, seg)
+        iou += calc_iou(pred, seg)
+
+        if count == 0:
+            writer.add_image('images/val/img', vutils.make_grid(img[0].detach(), normalize=True, scale_each=True), iter_n)
+            writer.add_image('images/val/gt', pred_to_img(seg[0].detach()), iter_n, dataformats='HWC')
+            writer.add_image('images/val/pred', pred_to_img(pred[0].detach()), iter_n, dataformats='HWC')
+
+        count += 1
+
+    return loss / count, acc / count, iou / count
+
 def train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n=0):
     criterion = nn.CrossEntropyLoss()
 
@@ -257,29 +347,14 @@ def train_epoch_unary(train_loader, val_loader, model, opt, sch, iter_n=0):
         writer.add_scalar('train/IoU', train_iou, iter_n)
         writer.add_scalar('train/acc', train_acc, iter_n)
 
-        if iter_n % 30 == 0:
-            model.eval()
-            val_img, val_seg = next(iter(val_loader))
-            val_img = val_img.to(device)
-            val_seg = val_seg.long().to(device)
-
-            val_out = model(val_img)['out']
-            val_loss = criterion(val_out, val_seg)
-
-            val_pred = torch.argmax(val_out, dim=1)
-            val_iou = calc_iou(val_pred, val_seg)
-            val_acc = calc_acc(val_pred, val_seg)
-            
-            writer.add_scalar('val/loss', val_loss.item(), iter_n)
-            writer.add_scalar('val/IoU', val_iou, iter_n)
-            writer.add_scalar('val/acc', val_acc, iter_n)
-
-            writer.add_image('images/img', vutils.make_grid(val_img[0].detach(), normalize=True, scale_each=True), iter_n)
-            writer.add_image('images/gt', pred_to_img(val_seg[0].detach()), iter_n, dataformats='HWC')
-            writer.add_image('images/pred', pred_to_img(val_pred[0].detach()), iter_n, dataformats='HWC')
+        if iter_n % 100 == 0:
+            writer.add_image('images/img', vutils.make_grid(img[0].detach(), normalize=True, scale_each=True), iter_n)
+            writer.add_image('images/gt', pred_to_img(seg[0].detach()), iter_n, dataformats='HWC')
+            writer.add_image('images/pred', pred_to_img(train_pred[0].detach()), iter_n, dataformats='HWC')
             model.train()
+            print(iter_n)
         iter_n += 1
-
+        
     return model, iter_n
 
 
@@ -297,5 +372,10 @@ def train(train_loader, val_loader, model, opt, sch, n_epochs, start_epoch=0, it
         print('Executed %d seconds' %(cur_time - since))
 
         torch.save(model.state_dict(), 'models/unary_' + str(start_epoch + i) + '.pth')
+        val_loss, val_acc, val_iou = evaluate(model, val_loader, iter_n)
+        writer.add_scalar('val/loss', val_loss, iter_n)
+        writer.add_scalar('val/IoU', val_iou, iter_n)
+        writer.add_scalar('val/acc', val_acc, iter_n)
 
     return model, iter_n
+
